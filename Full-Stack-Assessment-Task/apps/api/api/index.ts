@@ -1,15 +1,17 @@
 import 'reflect-metadata';
-import { ValidationPipe } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { NestFactory } from '@nestjs/core';
-import { ExpressAdapter } from '@nestjs/platform-express';
-import express, { Express, Request, Response } from 'express';
-import helmet from 'helmet';
-import { AppModule } from '../src/app.module';
+import type { Request, Response } from 'express';
 
-let cachedServer: Express | null = null;
+let cachedServer: any = null;
 
-async function bootstrapServer(): Promise<Express> {
+async function bootstrapServer() {
+  const express = require('express');
+  const { NestFactory } = require('@nestjs/core');
+  const { ExpressAdapter } = require('@nestjs/platform-express');
+  const { ValidationPipe } = require('@nestjs/common');
+  const { ConfigService } = require('@nestjs/config');
+  const helmet = require('helmet');
+  const { AppModule } = require('../dist/app.module');
+
   const server = express();
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server), {
     bufferLogs: true,
@@ -17,16 +19,13 @@ async function bootstrapServer(): Promise<Express> {
   const configService = app.get(ConfigService);
 
   app.use(helmet());
-  const webOrigin = configService.get<string>('WEB_ORIGIN');
+  const webOrigin = configService.get('WEB_ORIGIN');
   app.enableCors({
     origin: (
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void,
     ) => {
-      // Allow requests with no origin (like mobile apps, curl, server-to-server)
-      if (!origin) {
-        return callback(null, true);
-      }
+      if (!origin) return callback(null, true);
       if (
         !webOrigin ||
         webOrigin === '*' ||
@@ -42,6 +41,7 @@ async function bootstrapServer(): Promise<Express> {
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
   });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -55,14 +55,10 @@ async function bootstrapServer(): Promise<Express> {
   return server;
 }
 
-export default async function handler(req: Request, res: Response): Promise<void> {
-  const origin = (req.headers.origin as string) || '';
+export default async function handler(req: Request, res: Response) {
+  const origin = (req.headers && (req.headers.origin as string)) || '*';
 
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
@@ -70,7 +66,6 @@ export default async function handler(req: Request, res: Response): Promise<void
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization',
   );
 
-  // Immediately respond to OPTIONS preflight requests without booting Nest
   if (req.method === 'OPTIONS') {
     res.status(204).end();
     return;
@@ -80,15 +75,14 @@ export default async function handler(req: Request, res: Response): Promise<void
     if (!cachedServer) {
       cachedServer = await bootstrapServer();
     }
-    cachedServer(req, res);
-  } catch (error) {
-    console.error('API bootstrap error:', error);
-    res.status(500).json({
+    return cachedServer(req, res);
+  } catch (error: any) {
+    console.error('Serverless function error:', error);
+    return res.status(500).json({
       statusCode: 500,
-      message: 'Backend server bootstrap failed',
-      error: error instanceof Error ? error.message : String(error),
+      message: 'Serverless function bootstrap failed',
+      error: error?.message || String(error),
+      stack: error?.stack || null,
     });
   }
 }
-
-
