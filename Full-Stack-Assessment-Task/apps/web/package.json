@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "dev": "next dev --port ${WEB_PORT:-3742}",
-    "start": "next start --port ${WEB_PORT:-3742}",
+    "dev": "node -e \"const p=process.env.WEB_PORT||3000; require('child_process').spawn('npx', ['next', 'dev', '-p', p], {stdio:'inherit', shell:true})\"",
+    "start": "node -e \"const p=process.env.WEB_PORT||3000; require('child_process').spawn('npx', ['next', 'start', '-p', p], {stdio:'inherit', shell:true})\"",
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

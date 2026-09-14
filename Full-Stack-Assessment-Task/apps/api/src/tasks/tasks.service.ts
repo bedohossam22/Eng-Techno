@@ -113,13 +113,23 @@ export class TasksService {
     return this.toDetail(task, access.project);
   }
 
-  async updateStatus(taskId: Types.ObjectId, dto: UpdateTaskStatusDto): Promise<TaskDetail> {
+  async updateStatus(
+    taskId: Types.ObjectId,
+    userId: Types.ObjectId,
+    dto: UpdateTaskStatusDto,
+  ): Promise<TaskDetail> {
     const task = await this.findTaskOrFail(taskId);
+    const access = await this.projectAccessService.assertCanView(task.projectId, userId);
+
+    const isCreator = task.createdBy.equals(userId);
+    if (!canManage(access) && !isCreator) {
+      throw new ForbiddenException('You do not have permission to edit this task');
+    }
 
     task.status = dto.status;
     await task.save();
 
-    return this.toDetail(task);
+    return this.toDetail(task, access.project);
   }
 
   async remove(taskId: Types.ObjectId, userId: Types.ObjectId): Promise<void> {

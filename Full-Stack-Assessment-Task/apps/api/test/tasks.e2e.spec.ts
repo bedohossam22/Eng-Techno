@@ -146,4 +146,54 @@ describe('Tasks', () => {
     expect(response.body.total).toBe(1);
     expect(response.body.items[0]).toMatchObject({ title: 'Work in flight' });
   });
+
+  it('refuses to update task status for someone outside the project', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(member))
+      .send({ title: 'Task for authorization test' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}/status`)
+      .set('Authorization', authHeader(outsider))
+      .send({ status: TaskStatus.DONE })
+      .expect(403);
+  });
+
+  it('refuses to edit task details for someone outside the project', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(member))
+      .send({ title: 'Task for detail edit test' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}`)
+      .set('Authorization', authHeader(outsider))
+      .send({ title: 'Hacked Title' })
+      .expect(403);
+  });
+
+  it('allows a project member to update task status', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(member))
+      .send({ title: 'Member status update test' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    const updateRes = await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}/status`)
+      .set('Authorization', authHeader(member))
+      .send({ status: TaskStatus.DONE })
+      .expect(200);
+
+    expect(updateRes.body.status).toBe(TaskStatus.DONE);
+  });
 });
