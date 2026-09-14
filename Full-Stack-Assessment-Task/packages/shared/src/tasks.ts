@@ -36,3 +36,8 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
   [TaskPriority.HIGH]: 'High',
   [TaskPriority.URGENT]: 'Urgent',
 };
+
+export enum ActivityType {
+  TASK_ASSIGNEE_CHANGED = 'TASK_ASSIGNEE_CHANGED',
+}
+

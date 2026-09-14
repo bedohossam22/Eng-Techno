@@ -1,5 +1,5 @@
 import type { OrganizationRole, ProjectRole } from './roles';
-import type { TaskPriority, TaskStatus } from './tasks';
+import type { ActivityType, TaskPriority, TaskStatus } from './tasks';
 
 /** A user as returned by the API. Never carries credential material. */
 export interface UserSummary {
@@ -48,6 +48,7 @@ export interface TaskSummary {
   title: string;
   status: TaskStatus;
   priority: TaskPriority;
+  assignee: UserSummary | null;
   commentCount: number;
   createdBy: UserSummary;
   createdAt: string;
@@ -66,6 +67,18 @@ export interface CommentEntry {
   author: UserSummary;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  taskId: string;
+  type: ActivityType;
+  actor: UserSummary;
+  metadata: {
+    from: UserSummary | null;
+    to: UserSummary | null;
+  };
+  createdAt: string;
 }
 
 export interface AuthSession {
