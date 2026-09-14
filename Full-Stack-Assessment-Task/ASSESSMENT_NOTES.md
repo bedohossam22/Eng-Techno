@@ -1,61 +1,110 @@
-# ProjectFlow - Architectural Assessment & Codebase Notes
+# ProjectFlow — Architectural Assessment & Codebase Notes
 
-## Part 1: System Architecture
+## Part 1: Architecture Overview
 
-### 1. Overall Structure
-ProjectFlow is structured as a **TypeScript monorepo** managed with `pnpm workspaces` and `Turborepo`:
+### Monorepo Structure
 
-- **`apps/api` (Backend)**: NestJS 11 application with Mongoose 8 (MongoDB). Organized in domain-centric feature modules (`auth`, `users`, `organizations`, `organization-members`, `projects`, `project-members`, `tasks`, `comments`).
-- **`apps/web` (Frontend)**: Next.js 16 (App Router) with React 19 and Tailwind CSS 4. Uses feature-driven modular structure inside `src/features/` (`auth`, `projects`, `tasks`, `comments`, `organizations`).
-- **`packages/shared` (Shared Domain)**: Contains cross-cutting domain types, enums (`TaskStatus`, `TaskPriority`, `OrganizationRole`, `ProjectRole`), interfaces (`TaskDetail`, `TaskSummary`, `AuthSession`), DTO constants, and helper functions shared by both frontend and backend.
-- **`packages/tsconfig` & `packages/eslint-config`**: Shared base TypeScript and ESLint configuration across the workspace.
+ProjectFlow is a **TypeScript monorepo** managed with `pnpm workspaces` and Turborepo:
 
----
+| Workspace | Technology | Purpose |
+|-----------|-----------|---------|
+| `apps/api` | NestJS 11 + Mongoose 8 | REST API server |
+| `apps/web` | Next.js 16 (App Router) + React 19 + Tailwind CSS 4 | Browser frontend |
+| `packages/shared` | TypeScript library | Shared enums, constants, API response types |
+| `packages/tsconfig` | TypeScript | Shared `tsconfig.json` base configs |
+| `packages/eslint-config` | ESLint | Shared flat ESLint configs |
 
-### 2. Business Logic Location
-- **Controllers (`apps/api/src/**/*.controller.ts`)**: Controllers remain thin. Their responsibilities are limited to routing, parameter extraction (`@Param`, `@Query`), request body validation via class-validator DTOs, and extracting authenticated user context via `@CurrentUser()`.
-- **Services (`apps/api/src/**/*.service.ts`)**: Business logic, data transformations, database querying via Mongoose models, and domain constraints live entirely inside NestJS `@Injectable()` services.
-- **Authorization Layer (`ProjectAccessService`)**: Centralized access evaluation lives in [`apps/api/src/projects/project-access.service.ts`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/api/src/projects/project-access.service.ts). Access checks resolve organization-level elevated roles (`OWNER` / `ADMIN`) or project-level explicit roles (`PROJECT_MANAGER` / `MEMBER`).
-- **Schemas / Domain Models (`apps/api/src/**/schemas/*.schema.ts`)**: Mongoose schemas define field types, indices (such as unique compound keys on membership tables), and timestamps.
+### Backend (apps/api) — NestJS
 
----
+Business logic is organized in domain-centric feature modules:
 
-### 3. Frontend Server State Management
-- **TanStack Query 5 (React Query)**: Used for managing all server state, background refetching, and cache management on the client.
-- **Centralized Query Keys**: Defined in [`apps/web/src/lib/query-keys.ts`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/web/src/lib/query-keys.ts) to guarantee consistent cache keys across components and mutation invalidations (`queryClient.invalidateQueries`).
-- **Custom Feature Hooks**: Feature hooks (e.g. `useProjectTasks`, `useTask`, `useCreateTask`, `useUpdateTaskStatus` in [`apps/web/src/features/tasks/hooks.ts`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/web/src/features/tasks/hooks.ts)) encapsulate `useQuery` and `useMutation` hooks.
-- **Centralized API Client**: [`apps/web/src/lib/api-client.ts`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/web/src/lib/api-client.ts) (`apiRequest`) handles base URL configuration, automatically attaches JWT bearer tokens from `localStorage`, and handles structured `ApiError` throwing.
+- **Controllers** stay thin: routing, DTO validation via `class-validator`, user identity extraction via `@CurrentUser()`.
+- **Services** own all business rules, authorization enforcement, and Mongoose queries.
+- **`ProjectAccessService`** is a single centralized access evaluator — answers "may this user touch this project?" by checking organization-level elevated roles (`OWNER`/`ADMIN`) or explicit project membership rows (`PROJECT_MANAGER`/`MEMBER`).
+- **Mongoose Schemas** define field types, defaults, and indexes (compound indexes on membership tables).
+- **`JwtAuthGuard`** is registered globally; routes opt out via `@Public()` decorator.
 
----
+### Frontend (apps/web) — Next.js App Router
 
-## Part 4: Observations & Architectural Risks
-
-### 1. [Security / Critical] Missing Authorization Check on Task Status Update (Broken Level Access Control)
-- **Location**: [`apps/api/src/tasks/tasks.controller.ts:70-76`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/api/src/tasks/tasks.controller.ts#L70-L76) & [`apps/api/src/tasks/tasks.service.ts:116-123`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/api/src/tasks/tasks.service.ts#L116-L123)
-- **Description**: While `tasksService.update()` verifies `assertCanView` and permission guards (`canManage` or `isCreator`), the `updateStatus` method (`PATCH /tasks/:taskId/status`) accepts `taskId` and `dto` but **does not take or verify `userId`**, and never calls `ProjectAccessService.assertCanView`.
-- **Risk**: Any authenticated user can modify the status of any task in the database simply by knowing or guessing its `taskId`, bypassing organization and project authorization boundaries.
-- **Action Plan**: **Fix Now (Step 2)**. Inject `@CurrentUser('id')` into `updateStatus` controller method and invoke `this.projectAccessService.assertCanView(task.projectId, userId)` in `TasksService.updateStatus`.
+- **Feature-driven structure** under `src/features/` (`auth`, `projects`, `tasks`, `comments`).
+- **TanStack Query v5** owns all server state, background refetching, and invalidation.
+- **Centralized query keys** in `lib/query-keys.ts` keep invalidation predictable.
+- **Custom feature hooks** (`useTask`, `useProjectTasks`, `useUpdateTaskAssignee`, etc.) encapsulate `useQuery` and `useMutation`.
+- **Centralized API client** in `lib/api-client.ts` handles base URL, JWT bearer token attachment, and structured `ApiError` throwing.
+- React server components by default; `"use client"` only where hooks or interactivity require it.
 
 ---
 
-### 2. [Concurrency / Data Integrity] Non-Atomic Task Numbering Race Condition
-- **Location**: [`apps/api/src/tasks/tasks.service.ts:61-62`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/api/src/tasks/tasks.service.ts#L61-L62)
-- **Description**: Task number generation relies on `const taskCount = await this.taskModel.countDocuments({ projectId }); const number = taskCount + 1;`.
-- **Risk**: If two tasks are created concurrently in the same project, `countDocuments` will evaluate to the same value for both executions, resulting in duplicate task numbers and key collisions (e.g. two tasks `ENG-3`). Furthermore, deleting a task reduces `countDocuments`, causing future tasks to reuse existing numbers.
-- **Action Plan**: **Fix Later / Refactor**. Implement an atomic sequence counter collection or `$inc` document sequence in MongoDB for project task numbers.
+## Part 2: Identified Risks
+
+### Risk 1 — [Security / Critical] Missing Authorization on Task Status Updates (Now Fixed)
+- **Location**: `apps/api/src/tasks/tasks.controller.ts` · `PATCH /tasks/:taskId/status`
+- **Description**: The `updateStatus` endpoint did not extract `@CurrentUser('id')` and therefore never called `ProjectAccessService.assertCanView`. Any authenticated user could modify any task's status by knowing or guessing its ObjectId.
+- **Impact**: Broken Object-Level Authorization (BOLA/IDOR) — full cross-project data manipulation.
+- **Action**: **Fixed** — see `BUG_REPORT.md` for full details and regression tests.
+
+### Risk 2 — [Concurrency] Non-Atomic Task Numbering Race Condition
+- **Location**: `apps/api/src/tasks/tasks.service.ts::create`
+- **Description**: `const number = (await countDocuments({ projectId })) + 1` is a non-atomic read-then-write. Two concurrent task creations on the same project can resolve the same count value, producing duplicate task numbers and keys (`ENG-3` twice). Likewise, deleting tasks makes future tasks reuse previous numbers.
+- **Impact**: Duplicate keys break lookups, user-facing references (e.g. `ENG-3`), and unique-ness guarantees.
+- **Action**: Fix Later — implement an atomic `$inc` sequence counter per project document.
+
+### Risk 3 — [Security] JWT Stored in localStorage Vulnerable to XSS
+- **Location**: `apps/web/src/lib/auth-storage.ts`
+- **Description**: JWT access tokens are stored in `window.localStorage` and attached as `Authorization: Bearer` headers. Any XSS vulnerability — in the app or third-party scripts — can read and exfiltrate these tokens.
+- **Impact**: Full account takeover if XSS is introduced.
+- **Action**: Fix Later — migrate to `HttpOnly`, `SameSite=Strict` cookies for token storage.
+
+### Risk 4 — [Data Integrity] Non-Transactional Multi-Document Operations
+- **Location**: `apps/api/src/tasks/tasks.service.ts::remove`
+- **Description**: Deleting a task runs `commentModel.deleteMany` and `task.deleteOne()` inside `Promise.all` without a Mongoose session/transaction. If `task.deleteOne()` fails after comments are already deleted, comments are orphaned or lost.
+- **Impact**: Inconsistent database state on partial write failures.
+- **Action**: Fix Later — wrap multi-document writes in `startSession()` transactions.
 
 ---
 
-### 3. [Security / Authentication] LocalStorage Token Storage Vulnerable to XSS
-- **Location**: [`apps/web/src/lib/auth-storage.ts`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/web/src/lib/auth-storage.ts) & [`apps/web/src/lib/api-client.ts:43-46`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/web/src/lib/api-client.ts#L43-L46)
-- **Description**: JWT access tokens are stored directly in browser `localStorage` and attached via `Authorization: Bearer <token>`.
-- **Risk**: Any Cross-Site Scripting (XSS) vulnerability in client-side scripts or third-party dependencies can read `localStorage` and steal user access tokens.
-- **Action Plan**: **Fix Later**. Migrate token storage to `HttpOnly`, `SameSite=Strict` cookies with cookie-based session handling.
+## Code Review
+
+### What I Reviewed
+Focused on the task modification and authorization layers, specifically:
+- `PATCH /tasks/:taskId` — `TasksController.update` + `TasksService.update`
+- `PATCH /tasks/:taskId/status` — `TasksController.updateStatus` + `TasksService.updateStatus`
+- `TasksService.create` for assignment validation
+- `TasksService.findActivity` for N+1 prevention
+
+### Key Observations
+
+| File | Observation |
+|------|-------------|
+| `tasks.controller.ts` | Controllers are pleasantly thin — no logic leaks into them beyond parameter extraction. |
+| `tasks.service.ts` | Services are well-structured but `updateStatus` was missing authorization (fixed). The `toSummaries` helper uses batch aggregation for comment counts — good N+1 avoidance. |
+| `project-access.service.ts` | Single-responsibility, well-named (`assertCanView`, `assertCanManage`). Good separation. |
+| `tasks.service.ts::create` | `countDocuments + 1` for task numbering is the most acute production risk in the codebase. |
+| `jwt-auth.guard.ts` | Guard implementation is correct and global-by-default with `@Public()` opt-out — a secure default. |
 
 ---
 
-### 4. [Data Consistency] Non-Transactional Multi-Document Operations
-- **Location**: [`apps/api/src/tasks/tasks.service.ts:129`](file:///f:/Eng-Techno/Full-Stack-Assessment-Task/apps/api/src/tasks/tasks.service.ts#L129) (`remove`)
-- **Description**: Deleting a task executes `Promise.all([this.commentModel.deleteMany({ taskId }), task.deleteOne()])` without an active Mongoose transaction session.
-- **Risk**: If `task.deleteOne()` fails after comment deletion, comments are lost while the task remains in the database (partial write failure).
-- **Action Plan**: **Fix Later**. Introduce Mongoose transaction sessions (`startSession()`) for multi-document operations.
+## Scaling the Activity System
+
+The current `Activity` collection with `{ taskId: 1, createdAt: -1 }` compound index is appropriate for the access pattern `GET /tasks/:taskId/activity`.
+
+**If volume grows significantly:**
+
+1. **Indexing is already correct** — the compound index supports efficient range scans per task sorted by time. No change needed for typical traffic.
+2. **Pagination is already in place** — the endpoint uses `skip` + `limit` with `countDocuments`, which is fine up to ~10M activities. Beyond that, use cursor-based pagination (keyset pagination on `_id` or `createdAt`).
+3. **Write throughput** — MongoDB handles high-frequency inserts to capped or time-series collections much better. For very high activity write volumes, consider converting the `activities` collection to a **MongoDB Time Series Collection** (`timeseries: { timeField: 'createdAt', metaField: 'taskId' }`).
+4. **Fan-out reads** — if activity feeds need to power org-level audit logs or dashboards, a separate aggregation pipeline or a dedicated read replica should be used.
+5. **User resolution N+1** — already prevented: `findActivity` collects all unique actor/assignee IDs first, then fetches them in a single `findManyByIds` call.
+
+---
+
+## If I Had Two More Days
+
+Priority order:
+
+1. **Fix atomic task numbering** — the duplicate-key race condition is the highest-impact production bug still outstanding. Replace `countDocuments + 1` with an atomic per-project sequence counter using `$inc` on a `ProjectCounters` collection.
+2. **Migrate JWT to HttpOnly cookies** — eliminates the XSS token-theft risk entirely. Requires adding a `/auth/refresh` endpoint and cookie-based token rotation.
+3. **Add Mongoose transactions** to task deletion (comments + activities + task) and any future multi-document writes.
+4. **Expand test coverage** — add E2E tests for the activity pagination endpoint, unassign flows, and OWNER/ADMIN assignment permissions explicitly.
+5. **Add task assignee filter** to `GET /projects/:projectId/tasks` — allows the board to show "tasks assigned to me" view.
+6. **Real-time activity feed** — replace polling with WebSocket or SSE so the activity timeline updates without manual refresh.
