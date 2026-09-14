@@ -1,7 +1,13 @@
 import type { INestApplication } from '@nestjs/common';
 import type { Connection } from 'mongoose';
 import request from 'supertest';
-import { OrganizationRole, ProjectRole, TaskPriority, TaskStatus } from '@projectflow/shared';
+import {
+  ActivityType,
+  OrganizationRole,
+  ProjectRole,
+  TaskPriority,
+  TaskStatus,
+} from '@projectflow/shared';
 import { createTestApp, resetDatabase } from './utils/test-app';
 import {
   addOrganizationMember,
@@ -195,5 +201,80 @@ describe('Tasks', () => {
       .expect(200);
 
     expect(updateRes.body.status).toBe(TaskStatus.DONE);
+  });
+
+  it('allows owner/manager to assign a task and creates an activity log', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(owner))
+      .send({ title: 'Task to assign' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    const assignRes = await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}`)
+      .set('Authorization', authHeader(owner))
+      .send({ assigneeId: member.id })
+      .expect(200);
+
+    expect(assignRes.body.assignee).toMatchObject({ id: member.id, email: member.email });
+
+    const activityRes = await request(app.getHttpServer())
+      .get(`/tasks/${taskId}/activity`)
+      .set('Authorization', authHeader(member))
+      .expect(200);
+
+    expect(activityRes.body.total).toBe(1);
+    expect(activityRes.body.items[0]).toMatchObject({
+      type: ActivityType.TASK_ASSIGNEE_CHANGED,
+      actor: { id: owner.id },
+      metadata: {
+        from: null,
+        to: { id: member.id },
+      },
+    });
+  });
+
+  it('refuses to assign a user who is not a member of the project', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(owner))
+      .send({ title: 'Task for invalid assignee' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}`)
+      .set('Authorization', authHeader(owner))
+      .send({ assigneeId: outsider.id })
+      .expect(400);
+  });
+
+  it('restricts regular members from assigning someone else', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post(`/projects/${projectId}/tasks`)
+      .set('Authorization', authHeader(member))
+      .send({ title: 'Task for member restriction test' })
+      .expect(201);
+
+    const taskId = createRes.body.id;
+
+    // Regular member assigning owner -> should be forbidden
+    await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}`)
+      .set('Authorization', authHeader(member))
+      .send({ assigneeId: owner.id })
+      .expect(403);
+
+    // Regular member assigning themselves -> allowed
+    const selfAssignRes = await request(app.getHttpServer())
+      .patch(`/tasks/${taskId}`)
+      .set('Authorization', authHeader(member))
+      .send({ assigneeId: member.id })
+      .expect(200);
+
+    expect(selfAssignRes.body.assignee).toMatchObject({ id: member.id });
   });
 });

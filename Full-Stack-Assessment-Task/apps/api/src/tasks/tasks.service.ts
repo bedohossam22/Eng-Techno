@@ -1,16 +1,30 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { type FilterQuery, Model, Types } from 'mongoose';
-import type { Paginated, TaskDetail, TaskSummary } from '@projectflow/shared';
+import {
+  ActivityType,
+  type ActivityEntry,
+  type Paginated,
+  type TaskDetail,
+  type TaskSummary,
+} from '@projectflow/shared';
+import type { PaginationQueryDto } from '../common/dto/pagination.dto';
+import { toObjectId } from '../common/utils/object-id';
 import { toUserSummary } from '../common/utils/serialize';
 import { Comment, type CommentDocument } from '../comments/schemas/comment.schema';
-import { canManage, ProjectAccessService } from '../projects/project-access.service';
+import { canManage, canView, ProjectAccessService } from '../projects/project-access.service';
 import { Project, type ProjectDocument } from '../projects/schemas/project.schema';
 import { UsersService } from '../users/users.service';
 import type { CreateTaskDto } from './dto/create-task.dto';
 import type { ListTasksQueryDto } from './dto/list-tasks.dto';
 import type { UpdateTaskDto } from './dto/update-task.dto';
 import type { UpdateTaskStatusDto } from './dto/update-task-status.dto';
+import { Activity, type ActivityDocument } from './schemas/activity.schema';
 import { Task, type TaskDocument } from './schemas/task.schema';
 
 @Injectable()
@@ -19,6 +33,7 @@ export class TasksService {
     @InjectModel(Task.name) private readonly taskModel: Model<TaskDocument>,
     @InjectModel(Project.name) private readonly projectModel: Model<ProjectDocument>,
     @InjectModel(Comment.name) private readonly commentModel: Model<CommentDocument>,
+    @InjectModel(Activity.name) private readonly activityModel: Model<ActivityDocument>,
     private readonly projectAccessService: ProjectAccessService,
     private readonly usersService: UsersService,
   ) {}
@@ -56,7 +71,19 @@ export class TasksService {
     userId: Types.ObjectId,
     dto: CreateTaskDto,
   ): Promise<TaskDetail> {
-    const { project } = await this.projectAccessService.assertCanView(projectId, userId);
+    const access = await this.projectAccessService.assertCanView(projectId, userId);
+
+    let assigneeId: Types.ObjectId | null = null;
+    if (dto.assigneeId) {
+      assigneeId = toObjectId(dto.assigneeId, 'assignee id');
+      const targetAccess = await this.projectAccessService.resolve(projectId, assigneeId);
+      if (!canView(targetAccess)) {
+        throw new BadRequestException('Assignee must be a project member');
+      }
+      if (!canManage(access) && !assigneeId.equals(userId)) {
+        throw new ForbiddenException('Regular members can only assign themselves');
+      }
+    }
 
     const taskCount = await this.taskModel.countDocuments({ projectId });
     const number = taskCount + 1;
@@ -64,15 +91,25 @@ export class TasksService {
     const task = await this.taskModel.create({
       projectId,
       number,
-      key: `${project.key}-${number}`,
+      key: `${access.project.key}-${number}`,
       title: dto.title,
       description: dto.description ?? null,
       status: dto.status,
       priority: dto.priority,
+      assigneeId,
       createdBy: userId,
     });
 
-    return this.toDetail(task, project);
+    if (assigneeId) {
+      await this.activityModel.create({
+        taskId: task._id,
+        type: ActivityType.TASK_ASSIGNEE_CHANGED,
+        actorId: userId,
+        metadata: { from: null, to: assigneeId.toString() },
+      });
+    }
+
+    return this.toDetail(task, access.project);
   }
 
   async findOne(taskId: Types.ObjectId, userId: Types.ObjectId): Promise<TaskDetail> {
@@ -91,21 +128,73 @@ export class TasksService {
     const access = await this.projectAccessService.assertCanView(task.projectId, userId);
 
     const isCreator = task.createdBy.equals(userId);
-    if (!canManage(access) && !isCreator) {
-      throw new ForbiddenException('You do not have permission to edit this task');
-    }
+    const isManager = canManage(access);
 
     if (dto.title !== undefined) {
+      if (!isManager && !isCreator) {
+        throw new ForbiddenException('You do not have permission to edit this task');
+      }
       task.title = dto.title;
     }
     if (dto.description !== undefined) {
+      if (!isManager && !isCreator) {
+        throw new ForbiddenException('You do not have permission to edit this task');
+      }
       task.description = dto.description;
     }
     if (dto.status !== undefined) {
+      if (!isManager && !isCreator) {
+        throw new ForbiddenException('You do not have permission to edit this task');
+      }
       task.status = dto.status;
     }
     if (dto.priority !== undefined) {
+      if (!isManager && !isCreator) {
+        throw new ForbiddenException('You do not have permission to edit this task');
+      }
       task.priority = dto.priority;
+    }
+
+    if (dto.assigneeId !== undefined) {
+      const newAssigneeId = dto.assigneeId ? toObjectId(dto.assigneeId, 'assignee id') : null;
+      const oldAssigneeId = task.assigneeId ?? null;
+
+      const isChanged = oldAssigneeId
+        ? !oldAssigneeId.equals(newAssigneeId ?? undefined)
+        : newAssigneeId !== null;
+
+      if (isChanged) {
+        if (newAssigneeId) {
+          const targetAccess = await this.projectAccessService.resolve(
+            task.projectId,
+            newAssigneeId,
+          );
+          if (!canView(targetAccess)) {
+            throw new BadRequestException('Assignee must be a project member');
+          }
+        }
+
+        if (!isManager) {
+          const isSelfAssigning = newAssigneeId ? newAssigneeId.equals(userId) : false;
+          const isSelfUnassigning = newAssigneeId === null && oldAssigneeId?.equals(userId);
+
+          if (!isSelfAssigning && !isSelfUnassigning) {
+            throw new ForbiddenException('Regular members can only assign themselves');
+          }
+        }
+
+        task.assigneeId = newAssigneeId;
+
+        await this.activityModel.create({
+          taskId: task._id,
+          type: ActivityType.TASK_ASSIGNEE_CHANGED,
+          actorId: userId,
+          metadata: {
+            from: oldAssigneeId ? oldAssigneeId.toString() : null,
+            to: newAssigneeId ? newAssigneeId.toString() : null,
+          },
+        });
+      }
     }
 
     await task.save();
@@ -132,11 +221,83 @@ export class TasksService {
     return this.toDetail(task, access.project);
   }
 
+  async findActivity(
+    taskId: Types.ObjectId,
+    userId: Types.ObjectId,
+    query: PaginationQueryDto,
+  ): Promise<Paginated<ActivityEntry>> {
+    const task = await this.findTaskOrFail(taskId);
+    await this.projectAccessService.assertCanView(task.projectId, userId);
+
+    const [activities, total] = await Promise.all([
+      this.activityModel
+        .find({ taskId })
+        .sort({ createdAt: -1 })
+        .skip(query.skip)
+        .limit(query.pageSize)
+        .exec(),
+      this.activityModel.countDocuments({ taskId }),
+    ]);
+
+    if (activities.length === 0) {
+      return {
+        items: [],
+        total: 0,
+        page: query.page,
+        pageSize: query.pageSize,
+      };
+    }
+
+    const userIdsToFetch = new Set<string>();
+    activities.forEach((act) => {
+      userIdsToFetch.add(act.actorId.toString());
+      if (act.metadata?.from) {
+        userIdsToFetch.add(act.metadata.from);
+      }
+      if (act.metadata?.to) {
+        userIdsToFetch.add(act.metadata.to);
+      }
+    });
+
+    const users = await this.usersService.findManyByIds(
+      Array.from(userIdsToFetch).map((id) => new Types.ObjectId(id)),
+    );
+    const usersById = new Map(users.map((u) => [u._id.toString(), u]));
+
+    const items: ActivityEntry[] = activities.map((act) => {
+      const fromUser = act.metadata?.from ? usersById.get(act.metadata.from) : null;
+      const toUser = act.metadata?.to ? usersById.get(act.metadata.to) : null;
+
+      return {
+        id: act._id.toString(),
+        taskId: act.taskId.toString(),
+        type: act.type,
+        actor: toCreatorSummary(usersById.get(act.actorId.toString())),
+        metadata: {
+          from: fromUser ? toUserSummary(fromUser) : null,
+          to: toUser ? toUserSummary(toUser) : null,
+        },
+        createdAt: act.createdAt.toISOString(),
+      };
+    });
+
+    return {
+      items,
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+    };
+  }
+
   async remove(taskId: Types.ObjectId, userId: Types.ObjectId): Promise<void> {
     const task = await this.findTaskOrFail(taskId);
     await this.projectAccessService.assertCanManage(task.projectId, userId);
 
-    await Promise.all([this.commentModel.deleteMany({ taskId: task._id }), task.deleteOne()]);
+    await Promise.all([
+      this.commentModel.deleteMany({ taskId: task._id }),
+      this.activityModel.deleteMany({ taskId: task._id }),
+      task.deleteOne(),
+    ]);
   }
 
   async findTaskOrFail(taskId: Types.ObjectId): Promise<TaskDocument> {
@@ -152,8 +313,18 @@ export class TasksService {
       return [];
     }
 
-    const [creators, commentRows] = await Promise.all([
-      this.usersService.findManyByIds(tasks.map((task) => task.createdBy)),
+    const userIdsToFetch = new Set<string>();
+    tasks.forEach((task) => {
+      userIdsToFetch.add(task.createdBy.toString());
+      if (task.assigneeId) {
+        userIdsToFetch.add(task.assigneeId.toString());
+      }
+    });
+
+    const [users, commentRows] = await Promise.all([
+      this.usersService.findManyByIds(
+        Array.from(userIdsToFetch).map((id) => new Types.ObjectId(id)),
+      ),
       this.commentModel
         .aggregate<{
           _id: Types.ObjectId;
@@ -165,22 +336,27 @@ export class TasksService {
         .exec(),
     ]);
 
-    const creatorsById = new Map(creators.map((user) => [user._id.toString(), user]));
+    const usersById = new Map(users.map((user) => [user._id.toString(), user]));
     const commentCounts = new Map(commentRows.map((row) => [row._id.toString(), row.count]));
 
-    return tasks.map((task) => ({
-      id: task._id.toString(),
-      projectId: task.projectId.toString(),
-      number: task.number,
-      key: task.key,
-      title: task.title,
-      status: task.status,
-      priority: task.priority,
-      commentCount: commentCounts.get(task._id.toString()) ?? 0,
-      createdBy: toCreatorSummary(creatorsById.get(task.createdBy.toString())),
-      createdAt: task.createdAt.toISOString(),
-      updatedAt: task.updatedAt.toISOString(),
-    }));
+    return tasks.map((task) => {
+      const assigneeUser = task.assigneeId ? usersById.get(task.assigneeId.toString()) : null;
+
+      return {
+        id: task._id.toString(),
+        projectId: task.projectId.toString(),
+        number: task.number,
+        key: task.key,
+        title: task.title,
+        status: task.status,
+        priority: task.priority,
+        assignee: assigneeUser ? toUserSummary(assigneeUser) : null,
+        commentCount: commentCounts.get(task._id.toString()) ?? 0,
+        createdBy: toCreatorSummary(usersById.get(task.createdBy.toString())),
+        createdAt: task.createdAt.toISOString(),
+        updatedAt: task.updatedAt.toISOString(),
+      };
+    });
   }
 
   private async toDetail(task: TaskDocument, project?: ProjectDocument): Promise<TaskDetail> {

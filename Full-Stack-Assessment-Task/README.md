@@ -240,6 +240,7 @@ GET    /tasks/:taskId
 PATCH  /tasks/:taskId
 PATCH  /tasks/:taskId/status
 DELETE /tasks/:taskId
+GET    /tasks/:taskId/activity
 
 GET    /tasks/:taskId/comments
 POST   /tasks/:taskId/comments
@@ -265,3 +266,35 @@ parsing.
 
 Components are server components by default; `"use client"` is added only where
 interactivity or hooks require it.
+
+---
+
+## Major Technical Decisions
+
+### 1. Activity Log as a Separate Collection
+
+Activity history is stored in a dedicated `activities` MongoDB collection rather than embedded in the task document. This keeps task documents small, allows efficient pagination of activity (indexed on `{ taskId: 1, createdAt: -1 }`), and makes it possible to query across activities globally in future without unbounded array scans.
+
+### 2. Batch User Resolution — Preventing N+1 Queries
+
+`TasksService.findActivity` collects all unique actor and assignee IDs from a page of activity records first, then calls `usersService.findManyByIds` once. No per-row user lookups are performed. The same pattern exists in `toSummaries` for task lists.
+
+### 3. Assignment Permission Model
+
+Three distinct levels of assignment permission are enforced in `TasksService`:
+- **OWNER / ADMIN / PROJECT_MANAGER** — can assign any project member or unassign tasks freely.
+- **Regular MEMBER** — can only assign themselves (self-assignment) or unassign themselves if currently assigned.
+- **Anyone not in the project** — assignee validated against `ProjectAccessService.assertCanView`; returns `400 Bad Request` if the target user is not a member.
+
+### 4. Authorization Fixed for Task Status Updates
+
+`PATCH /tasks/:taskId/status` was missing `@CurrentUser('id')` extraction and therefore bypassed all project-level authorization. Fixed by propagating `userId` through controller → service and calling `assertCanView` before any mutation. Regression tests added — see `BUG_REPORT.md`.
+
+### 5. Windows-Compatible Web Dev Script
+
+The original `dev` script used bash parameter expansion (`${WEB_PORT:-3742}`) which is unsupported in PowerShell. Replaced with an inline Node.js script to evaluate the env variable cross-platform.
+
+### 6. pnpm Workspaces — Build Order Matters
+
+`@projectflow/shared` must be built before `@projectflow/api` or `@projectflow/web` can start in dev mode. Turborepo handles this automatically via the `build` task dependency graph. When running individual apps without Turbo, run `pnpm --filter @projectflow/shared build` first.
+
