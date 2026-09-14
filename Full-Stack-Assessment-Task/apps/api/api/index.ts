@@ -1,17 +1,15 @@
 import 'reflect-metadata';
-import type { Request, Response } from 'express';
+import express, { Express, Request, Response } from 'express';
+import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { NestFactory } from '@nestjs/core';
+import { ExpressAdapter } from '@nestjs/platform-express';
+import helmet from 'helmet';
+import { AppModule } from '../dist/app.module';
 
-let cachedServer: any = null;
+let cachedServer: Express | null = null;
 
-async function bootstrapServer() {
-  const express = require('express');
-  const { NestFactory } = require('@nestjs/core');
-  const { ExpressAdapter } = require('@nestjs/platform-express');
-  const { ValidationPipe } = require('@nestjs/common');
-  const { ConfigService } = require('@nestjs/config');
-  const helmet = require('helmet');
-  const { AppModule } = require('../dist/app.module');
-
+async function bootstrapServer(): Promise<Express> {
   const server = express();
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server), {
     bufferLogs: true,
@@ -19,7 +17,7 @@ async function bootstrapServer() {
   const configService = app.get(ConfigService);
 
   app.use(helmet());
-  const webOrigin = configService.get('WEB_ORIGIN');
+  const webOrigin = configService.get<string>('WEB_ORIGIN');
   app.enableCors({
     origin: (
       origin: string | undefined,
@@ -55,7 +53,7 @@ async function bootstrapServer() {
   return server;
 }
 
-export default async function handler(req: Request, res: Response) {
+export default async function handler(req: Request, res: Response): Promise<void> {
   const origin = (req.headers && (req.headers.origin as string)) || '*';
 
   res.setHeader('Access-Control-Allow-Origin', origin);
@@ -75,14 +73,15 @@ export default async function handler(req: Request, res: Response) {
     if (!cachedServer) {
       cachedServer = await bootstrapServer();
     }
-    return cachedServer(req, res);
-  } catch (error: any) {
-    console.error('Serverless function error:', error);
-    return res.status(500).json({
+    cachedServer(req, res);
+  } catch (error: unknown) {
+    console.error('Serverless function bootstrap error:', error);
+    const err = error as Error;
+    res.status(500).json({
       statusCode: 500,
       message: 'Serverless function bootstrap failed',
-      error: error?.message || String(error),
-      stack: error?.stack || null,
+      error: err?.message || String(error),
+      stack: err?.stack || null,
     });
   }
 }
