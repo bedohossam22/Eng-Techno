@@ -11,11 +11,20 @@ async function bootstrap(): Promise<void> {
 
   const webOrigin = configService.get<string>('WEB_ORIGIN');
   app.enableCors({
-    origin: (origin, callback) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
       if (!origin) {
         return callback(null, true);
       }
-      if (!webOrigin || webOrigin === '*' || origin === webOrigin || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:')) {
+      if (
+        !webOrigin ||
+        webOrigin === '*' ||
+        origin === webOrigin ||
+        origin.endsWith('.vercel.app') ||
+        origin.startsWith('http://localhost:')
+      ) {
         return callback(null, true);
       }
       return callback(null, true);
