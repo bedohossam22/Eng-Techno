@@ -17,9 +17,21 @@ async function bootstrapServer(): Promise<Express> {
   const configService = app.get(ConfigService);
 
   app.use(helmet());
+  const webOrigin = configService.get<string>('WEB_ORIGIN');
   app.enableCors({
-    origin: configService.get<string>('WEB_ORIGIN') ?? '*',
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, server-to-server)
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (!webOrigin || webOrigin === '*' || origin === webOrigin || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:')) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
   });
   app.useGlobalPipes(
     new ValidationPipe({
@@ -35,8 +47,17 @@ async function bootstrapServer(): Promise<Express> {
 }
 
 export default async function handler(req: Request, res: Response): Promise<void> {
-  if (!cachedServer) {
-    cachedServer = await bootstrapServer();
+  try {
+    if (!cachedServer) {
+      cachedServer = await bootstrapServer();
+    }
+    cachedServer(req, res);
+  } catch (error) {
+    console.error('API bootstrap error:', error);
+    res.status(500).json({
+      statusCode: 500,
+      message: 'Backend server bootstrap failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
-  cachedServer(req, res);
 }

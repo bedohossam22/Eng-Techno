@@ -9,10 +9,20 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   const configService = app.get(ConfigService);
 
-  app.use(helmet());
+  const webOrigin = configService.get<string>('WEB_ORIGIN');
   app.enableCors({
-    origin: configService.get<string>('WEB_ORIGIN') ?? 'http://localhost:3742',
+    origin: (origin, callback) => {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (!webOrigin || webOrigin === '*' || origin === webOrigin || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:')) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
   });
   app.useGlobalPipes(
     new ValidationPipe({
